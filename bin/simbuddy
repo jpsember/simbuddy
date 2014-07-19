@@ -1,0 +1,4 @@
+#!/usr/bin/env ruby
+
+require 'simbuddy'
+SimBuddyApp.new.run

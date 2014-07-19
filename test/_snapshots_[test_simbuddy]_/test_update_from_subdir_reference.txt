@@ -1,0 +1,5 @@
+Processing sample_xcode_project.xcodeproj
+W a.txt
+W c/d.txt
+. e.txt
+Cleaning project
