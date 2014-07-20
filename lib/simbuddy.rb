@@ -171,7 +171,7 @@ class SimBuddyApp
       subdirs.sort!
 
       break if subdirs.length == 0
-      warning "Multiple simulators found, using last; directory #{dir}" if subdirs.length > 1
+      warning "Multiple simulators found: #{subdirs}; using last: #{subdirs.last}" if subdirs.length > 1
       @simulator_dir = File.join(dir,subdirs.last)
     end
     die "Can't find simulator" if !@simulator_dir
