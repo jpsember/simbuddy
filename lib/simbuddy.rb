@@ -1,5 +1,6 @@
 #!/usr/bin/env ruby
 
+require 'CFPropertyList'
 require 'trollop'
 require 'js_base'
 require 'backup_set'
@@ -23,9 +24,7 @@ class SimBuddyApp
     @simulator_dir = nil
     @project_resource_path = nil
     @target = nil
-    @application_app_directory = nil
     @application_directory = nil
-    @application_resource_directory = nil
     @derived_app_resource_subdirectories = nil
     @application_newfiles_directory = nil
     @project_modified = false
@@ -34,13 +33,40 @@ class SimBuddyApp
   def run(args = ARGV)
 
     options = Trollop::options(args) do
+        banner <<-EOS
+Persists files created by iOS app running within simulator to the corresponding XCode project directory.
+
+Two important parameters are required:
+
+1) The XCode project directory
+
+2) The iPhone simulator (data) directory lies within
+
+      {A} = ~/Library/Developer/CoreSimulator/Devices/[Device ID]
+
+    where [Device ID] is a random stream whose meaning can be determined by typing
+    'xcrun instruments -s'.
+
+    {A} contains a subdirectory
+
+      {B} = {A}/data/Containers/Data/Application/[appGUID]
+
+    where [appGUID] is another random stream, a unique one for each installed app, and
+    this changes with each build (I believe), so it can't be hard-coded within an invoking script.
+    You can call [JSSimulator printPath] to show this information.
+
+    The simulator argument should specify {B}, but excluding the [appGUID].
+
+EOS
         opt :project, "specify project (or project directory)", :type => :string
         opt :verbose, "verbose"
         opt :simulator, "specify iPhone simulator directory", :type => :string
+        opt :dryrun, "dry run; don't do any actual changes"
     end
 
     @verbose = options[:verbose]
     @simulator_dir = options[:simulator]
+    @dryrun = options[:dryrun]
 
     @project_directory = find_project(options[:project])
     @project_name = FileUtils.remove_extension(File.basename(@project_directory))
@@ -66,7 +92,7 @@ class SimBuddyApp
       project_path = start_path
       found = false
       while true
-        # info "Looking for .xcodeproject within #{project_path}"
+        info "Looking for .xcodeproject within #{project_path}"
         break if !File.directory?(project_path)
         files = Dir.entries(project_path).select{|x| File.extname(x) == '.xcodeproj'}
         if files.size == 0
@@ -115,38 +141,40 @@ class SimBuddyApp
     @target
   end
 
+  # Determine application's directory within the simulator; see note (2) above
+  #
   def application_directory
-    application_app_directory
-    @application_directory
-  end
-
-  def application_app_directory
-    if !@application_app_directory
-      app_container_dir = File.join(simulator_dir,'Applications')
-      die "Can't find application container directory" if !File.directory?(app_container_dir)
-      app_dirs = FileUtils.directory_entries(app_container_dir).select{|x| File.directory?(File.join(app_container_dir,x))}.sort
+    if !@application_directory
+      sim_dir = @simulator_dir
+      die "No simulator directory specified" if !sim_dir
+      die "No simulator directory found: #{sim_dir}" if !File.directory?(sim_dir)
+      # Determine which subdirectory contains the desired app
+      app_dirs = FileUtils.directory_entries(@simulator_dir).select{|x| File.directory?(File.join(sim_dir,x))}.sort
       our_app_dirs = []
+      info "Looking for app within applications directory #{sim_dir}"
+
+      # I think we need to replace underscores with dashes when searching for the project name
+      # within the .plist file...
+      search_string = @project_name.gsub("_","-")
+
       app_dirs.each do |app_dir|
-        app_dir = File.join(app_container_dir,app_dir)
-        target_dir = File.join(app_dir,target+".app")
-        next if !File.directory?(target_dir)
-        our_app_dirs << target_dir
+         app_dir = File.join(@simulator_dir,app_dir)
+         meta_file = File.join(app_dir,".com.apple.mobile_container_manager.metadata.plist")
+         next if !File.exist?(meta_file)
+         plist = CFPropertyList::List.new(:file => meta_file)
+         data = CFPropertyList.native_types(plist.value)
+         value = data["MCMMetadataIdentifier"]
+         next if !value
+         info "Looking for project name '#{search_string}' within #{value}"
+         next if !value.include?(search_string)
+         our_app_dirs << app_dir
       end
       die "Multiple application directories found for target:\n#{our_app_dirs}" if our_app_dirs.size > 1
       die "No application directory found for target" if our_app_dirs.size == 0
-      @application_app_directory = our_app_dirs[0]
-      @application_directory = File.dirname(@application_app_directory)
-      # info "application_app_directory #{@application_app_directory}\n"
-    end
-    @application_app_directory
-  end
 
-  def application_resource_directory
-    if !@application_resource_directory
-      @application_resource_directory = File.join(application_app_directory,app_resources_name)
-       "No test_app_resources subdirectory found at #{@application_resource_directory}" if !File.directory?(@application_resource_directory)
+      @application_directory = our_app_dirs[0]
     end
-    @application_resource_directory
+    @application_directory
   end
 
   def application_newfiles_directory
@@ -170,7 +198,10 @@ class SimBuddyApp
       end
       subdirs.sort!
 
-      break if subdirs.length == 0
+      if subdirs.length == 0
+        info "No simulator subdirectories found within #{dir}"
+        break
+      end
       warning "Multiple simulators found: #{subdirs}; using last: #{subdirs.last}" if subdirs.length > 1
       @simulator_dir = File.join(dir,subdirs.last)
     end
@@ -191,7 +222,7 @@ class SimBuddyApp
   end
 
   def backup_set
-    if !@backup_set
+    if !@backup_set && !@dryrun
       @backup_set = BackupSet.new('simbuddy',project_resource_path)
     end
     @backup_set
@@ -214,28 +245,28 @@ class SimBuddyApp
       if project_time < app_time
         update = true
       end
-      # warning "doing special test for file that may not actually be newer"
-      # if app_path.end_with?("testNoPrefix.txt")
-      #    update = true
-      # end
     end
 
     info "#{status} #{path_rel}"
     if update
       if file_exists
-        backup_set.backup_file(project_path)
+        backup_set.backup_file(project_path) if !@dryrun
       end
 
-      FileUtils.mkdir_p(File.dirname(project_path))
-      status = 'W'
-      FileUtils.cp(app_path,project_path)
+      if !@dryrun
+        FileUtils.mkdir_p(File.dirname(project_path))
+        status = 'W'
+        FileUtils.cp(app_path,project_path)
+      end
       @project_modified = true
 
       derived_dirs = derived_app_resource_subdirectories
       derived_dirs.each do |subdir|
         derived_path = File.join(subdir,path_rel)
-        FileUtils.mkdir_p(File.dirname(derived_path))
-        FileUtils.cp(app_path,derived_path)
+        if !@dryrun
+          FileUtils.mkdir_p(File.dirname(derived_path))
+          FileUtils.cp(app_path,derived_path)
+        end
         info "  ==> #{derived_path}"
       end
     end
@@ -246,8 +277,10 @@ class SimBuddyApp
     return if !File.directory?(newfiles_dir)
     info "Updating new resource files from: #{newfiles_dir}"
     update_newfiles_aux(newfiles_dir)
-    # Now that the new files have been processed, delete their directory
-    FileUtils.rm_rf(newfiles_dir)
+    if !@dryrun
+      # Now that the new files have been processed, delete their directory
+      FileUtils.rm_rf(newfiles_dir)
+    end
   end
 
   def derived_data_directory_subdir(dir)
